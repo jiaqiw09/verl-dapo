@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from verl.single_controller.base.worker import DistGlobalInfo, DistRankInfo, Worker
-
+from mindspeed import megatron_adaptor
 
 class MegatronWorker(Worker):
     def __init__(self, cuda_visible_devices=None) -> None:

@@ -19,6 +19,21 @@ from megatron.core.packed_seq_params import PackedSeqParams
 
 from verl.utils.model import CausalLMOutputForPPO
 
+def compute_qkv_index(seq_lens):
+    full_indices = list(range(seq_lens[-1]))
+    prev_eod_pos = 0
+    kv_indices = []
+    q_indices = []
+    for eod_pos in seq_lens:
+        mid = (eod_pos + prev_eod_pos) // 2
+        kv_indices.extend(full_indices[prev_eod_pos:mid])
+        q_indices.extend(full_indices[mid:eod_pos])
+        prev_eod_pos = eod_pos
+
+    kv_index = torch.tensor(kv_indices).cuda(non_blocking=True)
+    q_index = torch.tensor(q_indices).cuda(non_blocking=True)
+
+    return q_index, kv_index
 
 def preprocess_packed_seqs(
     input_ids: torch.Tensor, attention_mask: torch.Tensor, pre_process: bool = True
@@ -72,6 +87,7 @@ def preprocess_packed_seqs(
                     remain_start:remain_end
                 ]
 
+    cu_seqlens_padded_div_cp = cu_seqlens_padded // cp_size
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,
@@ -81,6 +97,12 @@ def preprocess_packed_seqs(
         cu_seqlens_q_padded=cu_seqlens_padded,
         cu_seqlens_kv_padded=cu_seqlens_padded,
     )
+
+    q_index, kv_index = compute_qkv_index(cu_seqlens_padded_div_cp.clone().tolist())
+    packed_seq_params.q_index = q_index
+    packed_seq_params.kv_index = kv_index
+    packed_seq_params.cu_seqlens_padded_div_cp = cu_seqlens_padded_div_cp
+
     if pre_process:
         return input_ids_rmpad.unsqueeze(0), packed_seq_params
     else:
