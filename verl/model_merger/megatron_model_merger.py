@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, ContextManager
 
+from mindspeed import megatron_adaptor
 import torch
 from accelerate import init_empty_weights
 from megatron.core import mpu
