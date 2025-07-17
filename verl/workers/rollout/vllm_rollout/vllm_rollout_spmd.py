@@ -57,35 +57,6 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 # 3. simplify init logics
 
 
-
-
-# def _init_dp_envs(tp_size):
-#     world_size = torch.distributed.get_world_size()
-#     rank = torch.distributed.get_rank()
-#     ip = os.environ.get("VLLM_DP_MASTER_IP", "127.0.0.1")
-#     # ip = "33.215.116.204"
-#     port = int(os.environ.get("MASTER_PORT")) + 10
-
-#     dp_size = world_size // tp_size
-#     local_dp_rank = rank // tp_size
-#     group_idx = rank % tp_size
-
-#     distributed_init_method = f"tcp://{ip}:{port}"
-#     # print(f"Adjusting world_size={dp_size} rank={local_dp_rank}
-#     #         distributed_init_method={distributed_init_method} for DP")
-#     logger.info("Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
-#                 world_size, rank, distributed_init_method)
-#     os.environ["VLLM_DP_MASTER_IP"] = ip
-#     os.environ["VLLM_DP_MASTER_PORT"] = str(port + group_idx)
-#     os.environ["VLLM_DP_RANK"] = str(local_dp_rank)
-#     os.environ["VLLM_DP_SIZE"] = str(dp_size)
-#     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
-#     os.environ["VLLM_PORT"] = os.environ["VLLM_DP_MASTER_PORT"]
-#     envs.VLLM_DP_RANK = int(os.environ["VLLM_DP_RANK"])
-#     envs.VLLM_DP_MASTER_IP = os.environ["VLLM_DP_MASTER_IP"]
-#     envs.VLLM_DP_MASTER_PORT = int(os.environ["VLLM_DP_MASTER_PORT"])
-
-
 from vllm.utils import get_open_port
 import vllm.envs as envs
 import torch.distributed as dist
@@ -412,14 +383,16 @@ class vLLMRollout(BaseRollout):
                 for sample_id in range(len(output.outputs)):
                     response_ids = output.outputs[sample_id].token_ids
                     response.append(response_ids)
-                    curr_log_prob = []
-                    for i, logprob in enumerate(output.outputs[sample_id].logprobs):
-                        curr_log_prob.append(logprob[response_ids[i]].logprob)
-                    rollout_log_probs.append(curr_log_prob)
+                    if self.config.calculate_log_probs:
+                        curr_log_prob = []
+                        for i, logprob in enumerate(output.outputs[sample_id].logprobs):
+                            curr_log_prob.append(logprob[response_ids[i]].logprob)
+                        rollout_log_probs.append(curr_log_prob)
 
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
-            rollout_log_probs = pad_2d_list_to_length(rollout_log_probs, -1, max_length=self.config.response_length).to(idx.device)
-            rollout_log_probs = rollout_log_probs.to(torch.float32)
+            if self.config.calculate_log_probs:
+                rollout_log_probs = pad_2d_list_to_length(rollout_log_probs, -1, max_length=self.config.response_length).to(idx.device)
+                rollout_log_probs = rollout_log_probs.to(torch.float32)
 
             if self.sampling_params.n > 1 and do_sample:
                 idx = _repeat_interleave(idx, self.sampling_params.n)
@@ -429,6 +402,12 @@ class vLLMRollout(BaseRollout):
                 # NOTE(linjunrong): for multi-turn https://github.com/volcengine/verl/pull/1037
                 if "tools_kwargs" in non_tensor_batch.keys():
                     non_tensor_batch["tools_kwargs"] = _repeat_interleave(non_tensor_batch["tools_kwargs"], self.sampling_params.n)
+                if "interaction_kwargs" in non_tensor_batch.keys():
+                    non_tensor_batch["interaction_kwargs"] = _repeat_interleave(non_tensor_batch["interaction_kwargs"],
+                                                                                self.sampling_params.n)
+                if "raw_prompt" in non_tensor_batch.keys():
+                    non_tensor_batch["raw_prompt"] = _repeat_interleave(non_tensor_batch["raw_prompt"],
+                                                                        self.sampling_params.n)
 
             seq = torch.cat([idx, response], dim=-1)
 
@@ -453,12 +432,15 @@ class vLLMRollout(BaseRollout):
                 "prompts": idx,
                 "responses": response,
                 "input_ids": seq,  # here input_ids become the whole sentences
-                "rollout_log_probs": rollout_log_probs,  # we will recompute old log prob with actor
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
             },
             batch_size=batch_size,
         )
+
+        if self.config.calculate_log_probs:
+            # we will recompute old log prob with actor
+            batch["rollout_log_probs"] = rollout_log_probs
 
         # free vllm cache engine
         if (
